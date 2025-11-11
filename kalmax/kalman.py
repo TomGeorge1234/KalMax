@@ -11,31 +11,35 @@ class KalmanFilter:
     Written in jax, the lower level functions are jit compiled for speed. The filtering and smoothing loops are processed in batches using jax.lax.scan(): higher batch sizes will run faster but at the cost of a one-off compilation time.
     
     The Kalman dynamics equations are as follows:
-    z_t = F @ z_t-1 + q_t-1
+    z_t = F @ z_t-1 + B @ u_t + q_t
     y_t = H @ z_t + r_t
-    where z_t is the hidden state, y_t is the observation, F is the state transition matrix, H is the observation matrix, q_t ~ N(0, Q) is the state transition noise, and r_t ~ N(0, R) is the observation noise.
+    where z_t is the hidden state, y_t is the observation, u_t is the control input, F is the state transition matrix, B is the control matrix, H is the observation matrix, q_t ~ N(0, Q) is the state transition noise, and r_t ~ N(0, R) is the observation noise.
 
     Kalman _filtering_ takes observations and estimates the _causal_ posterior distribution of the hidden state given the observations. Kalman _smoothing_ takes the filtered estimates and estimates the _posterior_ distribution of the hidden state given all the observations.
-    mu_filter_t = E[z_t | y_1:t]
-    sigma_filter_t = Cov[z_t | y_1:t]
-    mu_smooth_t = E[z_t | y_1:T]
-    sigma_smooth_t = Cov[z_t | y_1:T]
+    mu_filter_t = E[z_t | y_1:t, u_1:t]
+    sigma_filter_t = Cov[z_t | y_1:t, u_1:t]
+    mu_smooth_t = E[z_t | y_1:T, u_1:T]
+    sigma_smooth_t = Cov[z_t | y_1:T, u_1:T]
     """
 
     def __init__(self, dim_Z : int, 
                        dim_Y : int,
+                       dim_U : int = 0,
                        batch_size : int = 100, 
                        # optional parameters
                        mu0 : jnp.ndarray = None,
                        sigma0 : jnp.ndarray = None,
                        F : jnp.ndarray = None,
+                       B : jnp.ndarray = None,
                        Q : jnp.ndarray = None,
                        H : jnp.ndarray = None,
                        R : jnp.ndarray = None,
                        ):
-        """Initializes the Kalman class. The state has size dim_Z, the observations have size dim_Y. 
+        """Initializes the Kalman class. The state has size dim_Z, the observations have size dim_Y, and the control input has size dim_U.
         
-        Parameters F, Q, H and R can either be:
+        If dim_U = 0, no control input is used.
+        
+        Parameters F, B, Q, H and R can either be:
         * Passed in at initialisation --> assumed constant over time
         * Passed in at runtime --> assumed to time-vary (additional time-dim in along the 0 axis matching the length of the observation data)
 
@@ -45,6 +49,8 @@ class KalmanFilter:
             The size of the state space
         dim_Y : int
             The size of the observation space
+        dim_U : int, optional
+            The size of the control space (default is 0, for no control)
         batch_size : int
             The batch size for the Kalman filter
 
@@ -56,6 +62,8 @@ class KalmanFilter:
             The initial state covariance
         F : jnp.ndarray, shape (dim_Z, dim_Z)
             The state transition matrix
+        B : jnp.ndarray, shape (dim_Z, dim_U)
+            The control matrix
         Q : jnp.ndarray, shape (dim_Z, dim_Z)
             The state transition noise covariance
         H : jnp.ndarray, shape (dim_X, dim_Z)
@@ -63,11 +71,12 @@ class KalmanFilter:
         R : jnp.ndarray, shape (dim_X, dim_X)
             The observation noise covariance
         """
-
+            
         self.dim_Z = dim_Z
         self.dim_Y = dim_Y
+        self.dim_U = dim_U
         self.batch_size = batch_size
-
+        
         # Optionally set parameters and initial conditions now
         if mu0 is not None:
             assert mu0.shape == (self.dim_Z,)
@@ -75,6 +84,8 @@ class KalmanFilter:
             assert sigma0.shape == (self.dim_Z, self.dim_Z)
         if F is not None:
             assert F.shape == (self.dim_Z, self.dim_Z)
+        if B is not None:
+            assert B.shape == (self.dim_Z, self.dim_U)  
         if Q is not None:
             assert Q.shape == (self.dim_Z, self.dim_Z)
         if H is not None:
@@ -85,29 +96,36 @@ class KalmanFilter:
         self.mu0 = mu0
         self.sigma0 = sigma0
         self.F = F
+        self.B = B if B is not None else jnp.zeros((self.dim_Z, self.dim_U))
         self.Q = Q
         self.H = H
         self.R = R
 
     def filter(self, Y, 
+                     U = None, # <-- MODIFIED: Made optional
                      mu0=None, 
                      sigma0=None, 
                      F=None,
+                     B=None, # <-- ADDED
                      Q=None,
                      H=None,
                      R=None,):
-        """Takes sequences of observations and observation noise covariances and runs the Kalman filter on the data. If parameters are not passed in, the class defaults are used. If they are passed in, they must have shape (T, *param_shape,) where T is the number of time steps - this allows for time-varying parameters.
+        """Takes sequences of observations, control inputs, and noise covariances and runs the Kalman filter on the data. If parameters are not passed in, the class defaults are used. If they are passed in, they must have shape (T, *param_shape,) where T is the number of time steps - this allows for time-varying parameters.
         
         Parameters
         ----------
-        Y : jnp.ndarray, shape (T, dim_Z)
+        Y : jnp.ndarray, shape (T, dim_Y)
             The observation means
+        U : jnp.ndarray, shape (T, dim_U), optional
+            The control inputs (defaults to zeros if not provided)
         mu0 : jnp.ndarray, shape (dim_Z,)
             The initial state mean, optional (default is provided at initialisation)
         sigma0 : jnp.ndarray, shape (dim_Z, dim_Z)
             The initial state covariance, optional (default is provided at initialisation)
         F : jnp.ndarray, shape (T, dim_Z, dim_Z)
             The state transition matrix, optional (default is provided at initialisation)
+        B : jnp.ndarray, shape (T, dim_Z, dim_U)
+            The control matrix, optional (default is provided at initialisation)
         Q : jnp.ndarray, shape (T, dim_Z, dim_Z)
             The state transition noise covariance, optional (default is provided at initialisation)
         H : jnp.ndarray, shape (T, dim_Z, dim_Z)
@@ -136,10 +154,17 @@ class KalmanFilter:
             sigma0 = self.sigma0
         else:
             assert sigma0.ndim == 2; assert sigma0.shape[0] == self.dim_Z; assert sigma0.shape[1] == self.dim_Z
+            
         F = self._verify_and_tile(F, self.F, T, (self.dim_Z, self.dim_Z))
+        B = self._verify_and_tile(B, self.B, T, (self.dim_Z, self.dim_U))
         Q = self._verify_and_tile(Q, self.Q, T, (self.dim_Z, self.dim_Z))
         H = self._verify_and_tile(H, self.H, T, (self.dim_Y, self.dim_Z))
         R = self._verify_and_tile(R, self.R, T, (self.dim_Y, self.dim_Y))
+
+        if U is None:
+            U = jnp.zeros((T, self.dim_U))
+        else:
+            assert U.ndim == 2; assert U.shape[0] == T; assert U.shape[1] == self.dim_U
 
         mus_f, sigmas_f = [],[] # filtered means and covariances
         
@@ -149,9 +174,11 @@ class KalmanFilter:
             end = min((i+1)*self.batch_size, T)
             mu, sigma = kalman_filter(
                     Y = Y[start:end],
+                    U = U[start:end],
                     mu0 = mu0, 
                     sigma0 = sigma0, 
                     F = F[start:end], 
+                    B = B[start:end],
                     Q = Q[start:end], 
                     H = H[start:end], 
                     R = R[start:end], )
@@ -165,9 +192,11 @@ class KalmanFilter:
     
     def smooth(self, mus_f, 
                      sigmas_f, 
+                     U = None,
                      F=None, 
+                     B=None,
                      Q=None,): 
-        """Takes the filtered means and covariances and runs the Kalman smoother on the data.
+        """Takes the filtered means, covariances, and control inputs and runs the Kalman smoother on the data.
 
         Parameters
         ----------
@@ -175,8 +204,12 @@ class KalmanFilter:
             The filtered means
         sigmas_f : jnp.ndarray, shape (T, dim_Z, dim_Z)
             The filtered covariances
+        U : jnp.ndarray, shape (T, dim_U), optional
+            The control inputs (defaults to zeros if not provided)
         F : jnp.ndarray, shape (T, dim_Z, dim_Z)
             The state transition matrix, optional
+        B : jnp.ndarray, shape (T, dim_Z, dim_U)
+            The control matrix, optional
         Q : jnp.ndarray, shape (T, dim_Z, dim_Z)
             The state transition noise covariance, optional
         
@@ -194,7 +227,13 @@ class KalmanFilter:
         mus_s, sigmas_s = [jnp.array([muT])],[jnp.array([sigmaT])]
 
         F = self._verify_and_tile(F, self.F, T, (self.dim_Z, self.dim_Z))
+        B = self._verify_and_tile(B, self.B, T, (self.dim_Z, self.dim_U))
         Q = self._verify_and_tile(Q, self.Q, T, (self.dim_Z, self.dim_Z))
+
+        if U is None:
+            U = jnp.zeros((T, self.dim_U))
+        else:
+            assert U.ndim == 2; assert U.shape[0] == T; assert U.shape[1] == self.dim_U
 
         for i in range(math.ceil((T-1)/(self.batch_size))):
             start = max(0, T - 1 - (i+1)*self.batch_size)
@@ -202,9 +241,11 @@ class KalmanFilter:
             mu, sigma = kalman_smoother(
                 mu = mus_f[start:end], 
                 sigma = sigmas_f[start:end], 
+                U = U[start:end],
                 muT = muT, 
                 sigmaT = sigmaT, 
-                F = F[start:end], 
+                F = F[start:end],
+                B = B[start:end],
                 Q = Q[start:end],)
             mus_s.insert(0,mu); sigmas_s.insert(0,sigma)
             muT, sigmaT = mu[0], sigma[0]
@@ -279,19 +320,23 @@ class KalmanFilter:
         return param
 
 @jit 
-def kalman_filter(Y, mu0, sigma0, F, Q, H, R):
+def kalman_filter(Y, U, mu0, sigma0, F, B, Q, H, R):
     """Kalman filters a batch of observation data, Y. 
 
     Parameters
     ----------
     Y : jnp.ndarray, shape (T, dim_Y)
         The observation means
+    U : jnp.ndarray, shape (T, dim_U)
+        The control inputs
     mu0 : jnp.ndarray, shape (dim_Z,)
         The initial state mean
     sigma0 : jnp.ndarray, shape (dim_Z, dim_Z)
         The initial state covariance
     F : jnp.ndarray, shape (T, dim_Z, dim_Z)
         The state transition matrix
+    B : jnp.ndarray, shape (T, dim_Z, dim_U)
+        The control matrix
     Q : jnp.ndarray, shape (T, dim_Z, dim_Z)
         The state transition noise covariance
     H : jnp.ndarray, shape (T, dim_Y, dim_Z)
@@ -309,15 +354,15 @@ def kalman_filter(Y, mu0, sigma0, F, Q, H, R):
     """
     def loop(carry, inputs):
         mu, sigma = carry
-        Y, F, Q, H, R, = inputs
-        mu_p, sigma_p = kalman_predict(mu, sigma, F, Q)
+        Y, u, F, B, Q, H, R, = inputs
+        mu_p, sigma_p = kalman_predict(mu, sigma, F, Q, B, u)
         mu_u, sigma_u = kalman_update(mu_p, sigma_p, H, R, Y)
         return (mu_u, sigma_u), (mu_u, sigma_u) # carry, output
-    _, (mu_all, sigma_all) = jax.lax.scan(loop, (mu0, sigma0), (Y, F, Q, H, R))
+    _, (mu_all, sigma_all) = jax.lax.scan(loop, (mu0, sigma0), (Y, U, F, B, Q, H, R))
     return jnp.stack(mu_all), jnp.stack(sigma_all)
 
 @jit
-def kalman_smoother(mu, sigma, muT, sigmaT, F, Q):
+def kalman_smoother(mu, sigma, U, muT, sigmaT, F, B, Q): # <-- ADDED U, B
     """Runs the Kalman smoother on the data. mu and sigma are in forward order, ie. mu = [mu[0], mu[1], ... mu[T]] and they are looped over in reverse order, so you can still batch the data. 
 
 
@@ -327,12 +372,16 @@ def kalman_smoother(mu, sigma, muT, sigmaT, F, Q):
         The filtered posterior state means 
     sigma : jnp.ndarray, shape (T, dim_Z, dim_Z)
         The filtered posterior state covariances
+    U : jnp.ndarray, shape (T, dim_U)
+        The control inputs
     muT : jnp.ndarray, shape (dim_Z,)
         The final state mean - by definition this should have already been smoothed
     sigmaT : jnp.ndarray, shape (dim_Z, dim_Z)
         The final state covariance - by definition this should have already been smoothed
     F : jnp.ndarray, shape (T, dim_Z, dim_Z)
         The state transition matrix
+    B : jnp.ndarray, shape (T, dim_Z, dim_U)
+        The control matrix
     Q : jnp.ndarray, shape (T, dim_Z, dim_Z)
         The state transition noise covariance
 
@@ -345,20 +394,20 @@ def kalman_smoother(mu, sigma, muT, sigmaT, F, Q):
     """
     def loop(carry, inputs):
         mu, sigma = carry
-        mu_, sigma_, F, Q = inputs
-        mu_predict, sigma_predict = kalman_predict(mu_, sigma_, F, Q)
+        mu_, sigma_, u, F, B, Q = inputs
+        mu_predict, sigma_predict = kalman_predict(mu_, sigma_, F, Q, B, u)
         J = sigma_ @ F.T @ jnp.linalg.inv(sigma_predict)
         mu_smoothed = mu_ + J @ (mu - mu_predict)
         sigma_smoothed = sigma_ + J @ (sigma - sigma_predict) @ J.T
         return (mu_smoothed, sigma_smoothed), (mu_smoothed, sigma_smoothed)
-    _, (mus_all, sigmas_all) = jax.lax.scan(loop, (muT, sigmaT), (mu[::-1], sigma[::-1], F[::-1], Q[::-1]))
+    _, (mus_all, sigmas_all) = jax.lax.scan(loop, (muT, sigmaT), (mu[::-1], sigma[::-1], U[::-1], F[::-1], B[::-1], Q[::-1]))
     mus_all = mus_all[::-1]
     sigmas_all = sigmas_all[::-1] # reverse the order back to forward
 
     return mus_all, sigmas_all
 
 @jit
-def kalman_likelihoods(Z, Y, mu, sigma, F, Q, H, R): # TODO check if this is ever used
+def kalman_likelihoods(Z, Y, mu, sigma, F, Q, H, R, B=None, U=None): # <-- MODIFIED
     """Calculates the prior P(Z), likelihood P(Y | Z), and posterior P(Z | Y) of any state trajectory (Z) and observations (Y, R) under the fitted kalman model. Note although Z and Y can, in principle, be _any_ trajectory and observations, typically Z == mu and Y == the observations which were used to fit the model in the first place. 
 
     Parameters
@@ -379,6 +428,10 @@ def kalman_likelihoods(Z, Y, mu, sigma, F, Q, H, R): # TODO check if this is eve
         The observation matrix
     R : jnp.ndarray, shape (T, dim_Y, dim_Y)
         The observation noise covariances
+    B : jnp.ndarray, shape (T, dim_Z, dim_U), optional
+        The control matrix
+    U : jnp.ndarray, shape (T, dim_U), optional
+        The control inputs
 
     Returns
     -------
@@ -389,18 +442,32 @@ def kalman_likelihoods(Z, Y, mu, sigma, F, Q, H, R): # TODO check if this is eve
     PXZF : jnp.ndarray, shape (T,)
         The likelihood of the observation given the state
     """
+    
+    T = Z.shape[0]
+    dim_Z = Z.shape[1]
+    if B is None:
+        dim_U = 0
+        B = jnp.zeros((T, dim_Z, dim_U))
+        U = jnp.zeros((T, dim_U))
+    elif U is None:
+        dim_U = B.shape[-1]
+        U = jnp.zeros((T, dim_U))
 
     Z_ = jnp.concatenate((Z[0][None], Z)) #prepend Z0 to Z so its [Z0, Z0, Z1, Z2, ... ZT]
+    U_ = jnp.concatenate((U[0][None], U)) #prepend U0 to U so its [U0, U0, U1, U2, ... UT]
     Q_ = jnp.concatenate((Q[0][None], Q)) #prepend Q0 to Q so its [Q0, Q0, Q1, Q2, ... QT]
     F_ = jnp.concatenate((F[0][None], F)) #prepend F0 to F so its [F0, F0, F1, F2, ... FT]
-    mu_p = jnp.einsum('ijk,ik->ij', F_, Z_) # the "next state" mean
+    B_ = jnp.concatenate((B[0][None], B)) #prepend B0 to B so its [B0, B0, B1, B2, ... BT]
+    
+    mu_p = jnp.einsum('ijk,ik->ij', F_, Z_) + jnp.einsum('ijk,ik->ij', B_, U_)
+    
     Y_hat = jnp.einsum('ijk,ik->ij', H, mu) # the "observation" mean
-    PZ   = vmap(gaussian_pdf,(0,0,0))(Z_[1:], mu_p[:-1], Q_[1:]) # zt ~ N(F*zt-1, Qt)
+    PZ   = vmap(gaussian_pdf,(0,0,0))(Z_[1:], mu_p[:-1], Q_[1:]) # zt ~ N(F*zt-1 + B*ut, Qt)
     PZXF = vmap(gaussian_pdf,(0,0,0))(Z, mu, sigma) # zt ~ N(mu, sigma)
     PXZF = vmap(gaussian_pdf,(0,0,0))(Y, Y_hat, R)
     return PZ, PZXF, PXZF
 
-def kalman_predict(mu, sigma, F, Q):
+def kalman_predict(mu, sigma, F, Q, B, u):
     """Predicts the next state of the system given the current state and the state transition matrix.
 
     Parameters
@@ -413,6 +480,10 @@ def kalman_predict(mu, sigma, F, Q):
         The state transition matrix
     Q : jnp.ndarray, shape (dim_Z, dim_Z)
         The state transition noise covariance
+    B : jnp.ndarray, shape (dim_Z, dim_U)
+        The control matrix
+    u : jnp.ndarray, shape (dim_U,)
+        The control input
 
     Returns
     -------
@@ -421,7 +492,7 @@ def kalman_predict(mu, sigma, F, Q):
     sigma_next : jnp.ndarray, shape (dim_Z, dim_Z)
         The predicted next state covariance
     """
-    mu_next = F @ mu
+    mu_next = F @ mu + B @ u
     sigma_next = F @ sigma @ F.T + Q
     return mu_next, sigma_next
 
@@ -496,6 +567,8 @@ def calculate_K_matrix(sigma, H, S):
 
 def fit_parameters(Z, Y): 
     """Assuming a training set exists where hidden states Z and observations Y are known, this function fits the optimal stationary parameters of the Kalman filter, i.e. returning those that maximise the likelihood of the data and the state: L(Θ) = log({z},{y} | Θ). These solutions are (relatively) easy to derive, I took them from Byron Yu's lecture notes (they look a lot like linear regression solutions): 
+    
+    **NOTE: This function assumes NO control input (B=0).** Fitting B would require U as an input and a different regression setup (e.g., regressing z_t+1 on [z_t, u_t]).
     
     mu0 = (1/T) Σ{zt}
     sigma0 = (1/T) Σ{zt - mu0}{zt - mu0}.T
@@ -574,7 +647,7 @@ def fit_sigma0(Z):
     return (1 / T) * ((Z - mu0).T @ (Z - mu0))
 
 def fit_F(Z):
-    """Fits the state transition matrix of the Kalman filter under the assumption of stationary dynamics, see `fit_parameters` for more details.
+    """Fits the state transition matrix of the Kalman filter under the assumption of stationary dynamics **and no control input**, see `fit_parameters` for more details.
 
     Parameters
     ----------
@@ -589,7 +662,7 @@ def fit_F(Z):
     return (Z[1:].T @ Z[:-1]) @ jnp.linalg.inv(Z.T @ Z)
 
 def fit_Q(Z):
-    """Fits the state transition noise covariance of the Kalman filter under the assumption of stationary dynamics, see `fit_parameters` for more details.
+    """Fits the state transition noise covariance of the Kalman filter under the assumption of stationary dynamics **and no control input**, see `fit_parameters` for more details.
 
     Parameters
     ----------
@@ -640,5 +713,3 @@ def fit_R(Z, Y):
     T = Z.shape[0]
     H = fit_H(Z,Y)
     return (1 / T) * (Y - Z @ H.T).T @ (Y - Z @ H.T)
-
-
