@@ -23,6 +23,6 @@ setuptools.setup(
         'jax',
     ],
     extras_require={
-        'demo': ['matplotlib', 'tqdm', 'ratinabox','pykalman'],
+        'demo': ['matplotlib', 'tqdm', 'ratinabox','pykalman', 'ipykernel'],
     }
 )
