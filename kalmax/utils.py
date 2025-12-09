@@ -104,10 +104,14 @@ def fit_gaussian(x, likelihood):
     assert x.ndim == 2
     assert likelihood.ndim == 1
     assert x.shape[0] == likelihood.shape[0]
-    
-    mu = (x.T @ likelihood) / likelihood.sum()
+
+    mu = (x.T @ likelihood) / (likelihood.sum() + 1e-8)
     mode = x[jnp.argmax(likelihood)]
-    covariance = ((x - mu) * likelihood[:, None]).T @ (x - mu) / likelihood.sum()
+    covariance = ((x - mu) * likelihood[:, None]).T @ (x - mu) / (likelihood.sum() + 1e-8)
+
+    # add a tiny diagonal term to the covariance to prevent numerical issues
+    covariance += 1e-6 * jnp.eye(x.shape[1])
+
     return mu, mode, covariance
 
 
@@ -139,7 +143,7 @@ def make_simulated_dataset(time_mins = 60, n_cells = 100, firing_rate = 10, rand
 
     from ratinabox.Environment import Environment 
     from ratinabox.Agent import Agent 
-    from ratinabox.Neurons import PlaceCells
+    from ratinabox.Neurons import PlaceCells, GridCells
 
     if random_seed is not None:
         import numpy as np
@@ -147,20 +151,24 @@ def make_simulated_dataset(time_mins = 60, n_cells = 100, firing_rate = 10, rand
     
     env_params = kwargs.get('env_params', {})
     agent_params = kwargs.get('agent_params', {'dt':0.1})
-    place_cell_params = kwargs.get('place_cell_params', {'n':n_cells, 'max_fr':firing_rate,'widths':0.1})
+    cell_type = kwargs.get('cell_type', 'PlaceCells')
 
     env = Environment(params=env_params)
     agent = Agent(env, params=agent_params)
-    place_cells = PlaceCells(agent, params=place_cell_params)
+    if cell_type == 'PlaceCells':
+        cell_params = kwargs.get('cell_params', {'n':n_cells, 'max_fr':firing_rate,'widths':0.1})
+        cells = PlaceCells(agent, params=cell_params)
+    elif cell_type == 'GridCells':
+        cell_params = kwargs.get('cell_params', {'n':n_cells, 'max_fr':firing_rate})
+        cells = GridCells(agent, params=cell_params)
     
-
     for i in tqdm.tqdm(range(int(60 * time_mins / agent.dt))):
         agent.update()
-        place_cells.update()
+        cells.update()
 
     time  = jnp.array(agent.history['t'])
     position = jnp.array(agent.history['pos'])
-    spikes = jnp.array(place_cells.history['spikes'])
+    spikes = jnp.array(cells.history['spikes'])
 
     return time, position, spikes
 

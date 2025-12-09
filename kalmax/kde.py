@@ -141,6 +141,47 @@ def poisson_log_likelihood(spikes : jnp.ndarray,
         return logPXmu
 
 
+def dot_product_correlation(
+        spikes: jnp.ndarray,
+        mean_rate: jnp.ndarray,
+        mask: jnp.ndarray = None,
+        renormalise: bool = True,
+        ) -> jnp.ndarray:   
+    """
+    Takes an array of spike counts and an array of mean rates and returns the correlation between the spiking vector and the mean rate vector across all times and all bins. This is a drop-in replacement for the poisson_log_likelihood which creates "likelihood-style" maps for spiking vector at each time step. Instead of actually calculating the likelihood (using Poisson statistics), this uses a simpler dot-product correlation measure. This can be useful when the assumptions of Poisson spiking are not met, or when a faster computation is required.
+
+
+    Parameters
+    ----------
+    spikes : jnp.ndarray, shape (T, N_neurons,)
+        How many spikes the neuron actually fired at each bin (int, can be > 1)
+    mean_rate : jnp.ndarray, shape (N_neurons, N_bins,)
+        The mean rate of the neuron (it's receptive field) at each bin. This is how many spikes you would _expect_ in at this position in a time dt.
+    mask : jnp.ndarray, shape (T, N_neurons,), optional
+        A boolean mask to apply to the spikes. If None, no mask is applied. Default is None.
+    renormalise : bool, optional
+        Has no effect, included for API compatibility with poisson_log_likelihood. Default is True.
+    
+    Returns
+    -------
+    similarity_maps : jnp.ndarray, shape (T, N_bins,)
+        The similarity between the spikes and the mean rate of the neuron for all times and bins. 
+    """
+
+    # If not passed make a no-mask mask (all True)
+    if mask is None: mask = jnp.ones_like(spikes, dtype=bool)   
+
+    # Calculate the mean rate of the neurons (this is the expected firing rate)
+    spikes = spikes * mask
+
+    # Calculate dot product and normalise across number of unmasked neurons
+    similarity_maps = spikes @ mean_rate / jnp.sum(mask, axis=1)[:, None]
+
+    return similarity_maps
+
+
+
+
 def poisson_log_likelihood_trajectory(spikes : jnp.ndarray,
                                       mean_rate_along_trajectory : jnp.ndarray,
                                       mask : jnp.ndarray = None,):
