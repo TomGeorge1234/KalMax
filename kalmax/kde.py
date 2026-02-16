@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Union, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -17,7 +17,7 @@ def kde(
         mask: jnp.ndarray = None,
         batch_size: int = 36000,
         return_position_density: bool = False,
-        ) -> jnp.ndarray:
+        ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """
     Performs KDE to estimate the expected number of spikes each neuron will fire at each position in `bins` given past `trajectory` and `spikes` data. This estimate is an expected-spike-count-per-timebin, in order to get firing rate in Hz, divide this by dt.
 
@@ -182,5 +182,5 @@ def poisson_log_likelihood_trajectory(spikes : jnp.ndarray,
     logPXmu = jnp.sum(mask * logPXmu, axis=1)
 
     return logPXmu
-      
+
 
