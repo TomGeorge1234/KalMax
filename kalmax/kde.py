@@ -16,6 +16,7 @@ def kde(
         kernel_bandwidth: float = 0.01,
         mask: jnp.ndarray = None,
         batch_size: int = 36000,
+        return_position_density: bool = False,
         ) -> jnp.ndarray:
     """
     Performs KDE to estimate the expected number of spikes each neuron will fire at each position in `bins` given past `trajectory` and `spikes` data. This estimate is an expected-spike-count-per-timebin, in order to get firing rate in Hz, divide this by dt.
@@ -45,11 +46,14 @@ def kde(
         A boolean mask to apply to the spikes. If None, no mask is applied. Default is None.
     batch_size : int
         The time axis is split into batches of this size to avoid memory errors, each batch is then processed in series. Default is 36000 (chosen to be 1 hr at 10 and an amount which doesn't crash CPU)
+    return_position_density : bool
+        If True, this function also returns the position density (the denominator of the KDE) at each bin.
 
     
     Returns
     -------
     kernel_density_estimate : jnp.ndarray, shape (N_neurons, N_bins)
+    position_density : jnp.ndarray, shape (N_neurons, N_bins) (optional)
     """
     assert bins.ndim == 2
     assert trajectory.ndim == 2
@@ -94,7 +98,10 @@ def kde(
     # calculate kde at each bin position 
     kernel_density_estimate = jnp.exp(jnp.log(spike_density) - jnp.log(position_density)).T
 
-    return kernel_density_estimate
+    if return_position_density:
+        return kernel_density_estimate, position_density
+    else:
+        return kernel_density_estimate
 
 
 def poisson_log_likelihood(spikes : jnp.ndarray,
