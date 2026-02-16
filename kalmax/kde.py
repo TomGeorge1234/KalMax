@@ -99,7 +99,7 @@ def kde(
     kernel_density_estimate = jnp.exp(jnp.log(spike_density) - jnp.log(position_density)).T
 
     if return_position_density:
-        return kernel_density_estimate, position_density
+        return kernel_density_estimate, position_density.T
     else:
         return kernel_density_estimate
 
