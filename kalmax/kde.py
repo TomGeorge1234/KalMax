@@ -1,5 +1,6 @@
-from typing import Callable, Union, Tuple
+from typing import Callable, Tuple, Union
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import vmap, jit
@@ -184,3 +185,93 @@ def poisson_log_likelihood_trajectory(spikes : jnp.ndarray,
     return logPXmu
 
 
+
+TAU = 2 * jnp.pi
+
+def wrap_minuspi_pi(theta: jnp.ndarray) -> jnp.ndarray:
+    """Wrap angles to [-pi, pi)."""
+    return jnp.mod(theta + jnp.pi, TAU) - jnp.pi
+
+def bin_indices_minuspi_pi(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
+    """
+    Map theta in radians (any range) to integer bin indices [0, n_bins),
+    where bin 0 corresponds to [-pi, -pi + Δ).
+    """
+    theta = wrap_minuspi_pi(theta)
+    u = (theta + jnp.pi) * (n_bins / TAU)           # in [0, n_bins)
+    idx = jnp.floor(u).astype(jnp.int32)
+    # guard against theta == pi mapping to n_bins (shouldn't happen for [-pi,pi) but safe)
+    return jnp.clip(idx, 0, n_bins - 1)
+
+def circular_conv_fft_1d(x: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
+    """Circular convolution via FFT for 1D arrays length N."""
+    return jnp.fft.ifft(jnp.fft.fft(x) * jnp.fft.fft(k)).real
+
+@partial(jax.jit, static_argnames=("kernel", "return_position_density"))
+def circular_kde(
+    bins: jnp.ndarray,                       # (N_bins,) bin centers in [-pi, pi)
+    trajectory: jnp.ndarray,                 # (T,) angles in radians
+    spikes: jnp.ndarray,                     # (T, N_neurons) spike counts
+    kernel=None,                             # unused placeholder
+    kernel_bandwidth: float = 10.0,          # von Mises kappa
+    mask: jnp.ndarray | None = None,         # (T, N_neurons) boolean
+    return_position_density: bool = False,
+    eps: float = 1e-6,
+) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
+    """
+    Circular KDE on [-pi, pi) with FFT circular convolution and von Mises kernel.
+
+    Output is expected spikes per time-bin per angle-bin (divide by dt for Hz),
+    shape (N_neurons, N_bins). If return_position_density=True, also returns
+    the smoothed occupancy per neuron, shape (N_neurons, N_bins).
+
+    IMPORTANT: bins are assumed to be uniformly spaced in [-pi, pi).
+    """
+
+    bins = jnp.asarray(bins).flatten()
+    trajectory = jnp.asarray(trajectory).flatten()
+    spikes = jnp.asarray(spikes)
+
+    n_bins = bins.shape[0]
+    T = trajectory.shape[0]
+    n_neurons = spikes.shape[1]
+
+    if mask is None:
+        mask = jnp.ones((T, n_neurons), dtype=bool)
+    mask_f = mask.astype(jnp.float32)
+
+    # 1) bin indices consistent with [-pi, pi)
+    idx = bin_indices_minuspi_pi(trajectory, n_bins)  # (T,)
+
+    # 2) von Mises kernel over offsets Δθ in [-pi, pi)
+    # Build on symmetric grid => Δθ=0 sits at index n_bins//2
+    dtheta = jnp.linspace(-jnp.pi, jnp.pi, n_bins, endpoint=False)
+    kappa = kernel_bandwidth
+    vm = jnp.exp(kappa * jnp.cos(dtheta))
+    vm = vm / jnp.sum(vm)
+
+    # Align for FFT: put Δθ=0 at index 0
+    vm = jnp.roll(vm, -n_bins // 2)
+
+    # 3) histogram per neuron using bincount (vmap over neurons)
+    def hist_for_neuron(weights_t: jnp.ndarray) -> jnp.ndarray:
+        return jnp.bincount(idx, weights=weights_t, length=n_bins)
+
+    # occupancy: mask only
+    pos_hist = vmap(hist_for_neuron, in_axes=1, out_axes=0)(mask_f)  # (N, B)
+
+    # spikes: spikes * mask
+    spike_w = spikes.astype(jnp.float32) * mask_f                    # (T, N)
+    spike_hist = vmap(hist_for_neuron, in_axes=1, out_axes=0)(spike_w)  # (N, B)
+
+    # 4) smooth via circular convolution
+    pos_smooth = vmap(circular_conv_fft_1d, in_axes=(0, None), out_axes=0)(pos_hist, vm)
+    spike_smooth = vmap(circular_conv_fft_1d, in_axes=(0, None), out_axes=0)(spike_hist, vm)
+
+    # 5) ratio
+    kde = spike_smooth / (pos_smooth + eps)
+    # (optional alternative) kde = (spike_smooth + eps) / (pos_smooth + eps)
+
+    if return_position_density:
+        return kde, pos_smooth
+    return kde
