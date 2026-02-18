@@ -3,7 +3,7 @@ from typing import Callable, Tuple, Union
 import jax
 import jax.numpy as jnp
 from jax import vmap, jit
-from kalmax.utils import gaussian_pdf
+from kalmax.utils import gaussian_pdf, _wrap_minuspi_pi, _bin_indices_minuspi_pi, _circular_conv_fft_1d
 from kalmax.kernels import gaussian_kernel
 
 from functools import partial
@@ -184,28 +184,6 @@ def poisson_log_likelihood_trajectory(spikes : jnp.ndarray,
     return logPXmu
 
 
-
-TAU = 2 * jnp.pi
-
-def wrap_minuspi_pi(theta: jnp.ndarray) -> jnp.ndarray:
-    """Wrap angles to [-pi, pi)."""
-    return jnp.mod(theta + jnp.pi, TAU) - jnp.pi
-
-def bin_indices_minuspi_pi(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
-    """
-    Map theta in radians (any range) to integer bin indices [0, n_bins),
-    where bin 0 corresponds to [-pi, -pi + Δ).
-    """
-    theta = wrap_minuspi_pi(theta)
-    u = (theta + jnp.pi) * (n_bins / TAU)           # in [0, n_bins)
-    idx = jnp.floor(u).astype(jnp.int32)
-    # guard against theta == pi mapping to n_bins (shouldn't happen for [-pi,pi) but safe)
-    return jnp.clip(idx, 0, n_bins - 1)
-
-def circular_conv_fft_1d(x: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
-    """Circular convolution via FFT for 1D arrays length N."""
-    return jnp.fft.ifft(jnp.fft.fft(x) * jnp.fft.fft(k)).real
-
 @partial(jax.jit, static_argnames=("kernel", "return_position_density"))
 def circular_kde(
     bins: jnp.ndarray,                       # (N_bins,) bin centers in [-pi, pi)
@@ -240,7 +218,7 @@ def circular_kde(
     mask_f = mask.astype(jnp.float32)
 
     # 1) bin indices consistent with [-pi, pi)
-    idx = bin_indices_minuspi_pi(trajectory, n_bins)  # (T,)
+    idx = _bin_indices_minuspi_pi(trajectory, n_bins)  # (T,)
 
     # 2) von Mises kernel over offsets Δθ in [-pi, pi)
     # Build on symmetric grid => Δθ=0 sits at index n_bins//2
@@ -264,8 +242,8 @@ def circular_kde(
     spike_hist = vmap(hist_for_neuron, in_axes=1, out_axes=0)(spike_w)  # (N, B)
 
     # 4) smooth via circular convolution
-    pos_smooth = vmap(circular_conv_fft_1d, in_axes=(0, None), out_axes=0)(pos_hist, vm)
-    spike_smooth = vmap(circular_conv_fft_1d, in_axes=(0, None), out_axes=0)(spike_hist, vm)
+    pos_smooth = vmap(_circular_conv_fft_1d, in_axes=(0, None), out_axes=0)(pos_hist, vm)
+    spike_smooth = vmap(_circular_conv_fft_1d, in_axes=(0, None), out_axes=0)(spike_hist, vm)
 
     # 5) ratio
     kde = spike_smooth / (pos_smooth + eps)
