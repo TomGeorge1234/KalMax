@@ -1,6 +1,5 @@
 from typing import Callable, Tuple, Union
 
-import numpy as np
 import jax
 import jax.numpy as jnp
 from jax import vmap, jit
@@ -214,7 +213,7 @@ def circular_kde(
     spikes: jnp.ndarray,                     # (T, N_neurons) spike counts
     kernel=None,                             # unused placeholder
     kernel_bandwidth: float = 10.0,          # von Mises kappa
-    mask: jnp.ndarray | None = None,         # (T, N_neurons) boolean
+    mask: jnp.ndarray = None,                # (T, N_neurons) boolean
     return_position_density: bool = False,
     eps: float = 1e-6,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
