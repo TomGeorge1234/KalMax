@@ -185,7 +185,7 @@ def poisson_log_likelihood_trajectory(spikes : jnp.ndarray,
 
 
 @partial(jax.jit, static_argnames=("kernel", "return_position_density"))
-def circular_kde(
+def kde_circular1d(
     bins: jnp.ndarray,                       # (N_bins,) bin centers in [-pi, pi)
     trajectory: jnp.ndarray,                 # (T,) angles in radians
     spikes: jnp.ndarray,                     # (T, N_neurons) spike counts
@@ -198,18 +198,59 @@ def circular_kde(
     """
     Circular KDE on [-pi, pi) with FFT circular convolution and von Mises kernel.
 
+    Computes the kernel density estimate as:
+    
+        KDE(θ) = spike_smooth(θ) / position_smooth(θ)
+    
+    where spike_smooth and position_smooth are obtained by circular convolution:
+    
+        spike_smooth = IFFT(FFT(spike_histogram) ⊙ FFT(von_Mises_kernel))
+        position_smooth = IFFT(FFT(position_histogram) ⊙ FFT(von_Mises_kernel))
+    
+    The ⊙ operator denotes element-wise multiplication. FFT-based circular convolution
+    allows efficient smoothing of histograms by the von Mises kernel without explicitly
+    computing all pairwise kernel evaluations.
+
     Output is expected spikes per time-bin per angle-bin (divide by dt for Hz),
     shape (N_neurons, N_bins). If return_position_density=True, also returns
     the smoothed occupancy per neuron, shape (N_neurons, N_bins).
 
     IMPORTANT: bins are assumed to be uniformly spaced in [-pi, pi).
+
+    Parameters
+    ----------
+    bins : jnp.ndarray, shape (N_bins, ) or (N_bins, 1,)
+        The angle bins at which to estimate the firing rate. Should be uniformly spaced in [-pi, pi).
+    trajectory : jnp.ndarray, shape (T, D)
+        The position of the agent at each time step
+    spikes : jnp.ndarray, shape (T, N_neurons)
+        The spike counts of the neuron at each time step (integer array, can be > 1)
+    kernel : function
+        The kernel function to use for density estimation. See `kernels.py` for signature and examples.
+    kernel_bandwidth : float
+        The bandwidth of the kernel
+    mask : jnp.ndarray, shape (T, N_neurons), optional
+        A boolean mask to apply to the spikes. If None, no mask is applied. Default is None.
+    batch_size : int
+        The time axis is split into batches of this size to avoid memory errors, each batch is then processed in series. Default is 36000 (chosen to be 1 hr at 10 and an amount which doesn't crash CPU)
+    return_position_density : bool
+        If True, this function also returns the position density (the denominator of the KDE) at each bin.
+
+    
+    Returns
+    -------
+    kernel_density_estimate : jnp.ndarray, shape (N_neurons, N_bins)
+    position_density : jnp.ndarray, shape (N_neurons, N_bins) (optional)
     """
+    assert bins.ndim == 1 or (bins.ndim == 2 and bins.shape[1] == 1), "bins should be shape (N_bins,) or (N_bins, 1)."
+    assert trajectory.ndim == 1, "trajectory should be shape (T,). kde_circular1d only supports 1D circular data."
 
     bins = jnp.asarray(bins).flatten()
     trajectory = jnp.asarray(trajectory).flatten()
     spikes = jnp.asarray(spikes)
 
     n_bins = bins.shape[0]
+    assert n_bins % 2 == 0, "n_bins should be even for FFT-based circular convolution."
     T = trajectory.shape[0]
     n_neurons = spikes.shape[1]
 
