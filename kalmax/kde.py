@@ -243,7 +243,7 @@ def kde_circular1d(
     position_density : jnp.ndarray, shape (N_neurons, N_bins) (optional)
     """
     assert bins.ndim == 1 or (bins.ndim == 2 and bins.shape[1] == 1), "bins should be shape (N_bins,) or (N_bins, 1)."
-    assert trajectory.ndim == 1, "trajectory should be shape (T,). kde_circular1d only supports 1D circular data."
+    assert trajectory.ndim == 1 or (trajectory.ndim == 2 and trajectory.shape[1] == 1), "trajectory should be shape (T,) or (T, 1). kde_circular1d only supports 1D circular data."
 
     bins = jnp.asarray(bins).flatten()
     trajectory = jnp.asarray(trajectory).flatten()
