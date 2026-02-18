@@ -53,7 +53,8 @@ def kde(
     Returns
     -------
     kernel_density_estimate : jnp.ndarray, shape (N_neurons, N_bins)
-    position_density : jnp.ndarray, shape (N_neurons, N_bins) (optional)
+    position_density : jnp.ndarray, shape (N_bins,) (optional)
+        Normalised position density (sums to 1 over bins), independent of neuron masks.
     """
     assert bins.ndim == 2
     assert trajectory.ndim == 2
@@ -65,19 +66,18 @@ def kde(
 
     # If not passed make a trivial mask (all True)
     if mask is None: mask = jnp.ones_like(spikes, dtype=bool)
-    
     # vmap the kernel K(x,mu,sigma) so it takes in a vector of positions and a vector of means
     kernel_fn = partial(kernel, bandwidth=kernel_bandwidth)
     vmapped_kernel = vmap(vmap(kernel_fn, in_axes=(0, None)), in_axes=(None, 0))
 
     spike_density = jnp.zeros((N_bins, N_neurons))
-    position_density = jnp.zeros((N_bins, N_neurons))
+    position_density_internal = jnp.zeros((N_bins, N_neurons)) # Seperate position density for neuron-specific masks, used to calculate KDE estimates 
+    position_density = jnp.zeros((N_bins,)) # Mask agnostic density, just "where has the animal been", optionally returned for downstream calculations. 
 
     N_batchs = int(jnp.ceil(T / batch_size))
     for i in range(N_batchs):
         start = i * batch_size
         end = min((i+1) * batch_size, T)
-        
         # Get the batch of trajectory, spikes and mask
         trajectory_batch = trajectory[start:end]
         spikes_batch = spikes[start:end]
@@ -86,20 +86,24 @@ def kde(
         # Pairwise kernel values for each trajectory-bin position pair. The bulk of the computation is done here. 
         kernel_values = vmapped_kernel(trajectory_batch, bins)
         # Calculate normalisation position density (the +epsilon is means unvisited positions should approach 0 density and avoid nans)
-        position_density_batch = kernel_values @ mask_batch + 1e-6
+        position_density_internal_batch = kernel_values @ mask_batch + 1e-6
+        # Mask-free position density for return
+        position_density += kernel_values.sum(axis=1)
         # Calculate spike density, replace nans from no-spikes with 0
         spike_density_batch = kernel_values @ (mask_batch*spikes_batch)
         spike_density_batch = jnp.where(jnp.isnan(spike_density_batch), 0, spike_density_batch)
 
         # Add these to the running total
         spike_density += spike_density_batch
-        position_density += position_density_batch
+        position_density_internal += position_density_internal_batch
 
-    # calculate kde at each bin position 
-    kernel_density_estimate = jnp.exp(jnp.log(spike_density) - jnp.log(position_density)).T
+    # calculate kde at each bin position
+    kernel_density_estimate = jnp.exp(jnp.log(spike_density) - jnp.log(position_density_internal)).T
 
     if return_position_density:
-        return kernel_density_estimate, position_density.T
+        # Normalise position density to a valid PDF
+        position_density = position_density / position_density.sum()
+        return kernel_density_estimate, position_density
     else:
         return kernel_density_estimate
 
@@ -213,7 +217,7 @@ def kde_circular1d(
 
     Output is expected spikes per time-bin per angle-bin (divide by dt for Hz),
     shape (N_neurons, N_bins). If return_position_density=True, also returns
-    the smoothed occupancy per neuron, shape (N_neurons, N_bins).
+    the smoothed occupancy, shape (N_bins,), normalised to sum to 1.
 
     IMPORTANT: bins are assumed to be uniformly spaced in [-pi, pi).
 
@@ -240,7 +244,8 @@ def kde_circular1d(
     Returns
     -------
     kernel_density_estimate : jnp.ndarray, shape (N_neurons, N_bins)
-    position_density : jnp.ndarray, shape (N_neurons, N_bins) (optional)
+    position_density : jnp.ndarray, shape (N_bins,) (optional)
+        Normalised position density (sums to 1 over bins), independent of neuron masks.
     """
     assert bins.ndim == 1 or (bins.ndim == 2 and bins.shape[1] == 1), "bins should be shape (N_bins,) or (N_bins, 1)."
     assert trajectory.ndim == 1 or (trajectory.ndim == 2 and trajectory.shape[1] == 1), "trajectory should be shape (T,) or (T, 1). kde_circular1d only supports 1D circular data."
@@ -275,8 +280,11 @@ def kde_circular1d(
     def hist_for_neuron(weights_t: jnp.ndarray) -> jnp.ndarray:
         return jnp.bincount(idx, weights=weights_t, length=n_bins)
 
-    # occupancy: mask only
+    # occupancy: mask only (per-neuron, used internally for KDE denominator)
     pos_hist = vmap(hist_for_neuron, in_axes=1, out_axes=0)(mask_f)  # (N, B)
+
+    # mask-free position histogram for return
+    pos_hist_total = hist_for_neuron(weights=jnp.ones(T, dtype=jnp.float32))  # (B,)
 
     # spikes: spikes * mask
     spike_w = spikes.astype(jnp.float32) * mask_f                    # (T, N)
@@ -285,11 +293,12 @@ def kde_circular1d(
     # 4) smooth via circular convolution
     pos_smooth = vmap(_circular_conv_fft_1d, in_axes=(0, None), out_axes=0)(pos_hist, vm)
     spike_smooth = vmap(_circular_conv_fft_1d, in_axes=(0, None), out_axes=0)(spike_hist, vm)
+    pos_smooth_total = _circular_conv_fft_1d(pos_hist_total, vm)  # (B,)
 
     # 5) ratio
     kde = spike_smooth / (pos_smooth + eps)
-    # (optional alternative) kde = (spike_smooth + eps) / (pos_smooth + eps)
 
     if return_position_density:
-        return kde, pos_smooth
+        position_density = pos_smooth_total / pos_smooth_total.sum()
+        return kde, position_density
     return kde
