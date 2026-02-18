@@ -189,7 +189,7 @@ def poisson_log_likelihood_trajectory(spikes : jnp.ndarray,
 
 
 @partial(jax.jit, static_argnames=("kernel", "return_position_density"))
-def kde_circular1d(
+def kde_angular(
     bins: jnp.ndarray,                       # (N_bins,) bin centers in [-pi, pi)
     trajectory: jnp.ndarray,                 # (T,) angles in radians
     spikes: jnp.ndarray,                     # (T, N_neurons) spike counts
@@ -200,84 +200,55 @@ def kde_circular1d(
     eps: float = 1e-6,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """
-    Performs circular KDE to estimate the expected number of spikes each neuron
-    will fire at each angular position in `bins` given past `trajectory` and
-    `spikes` data. This estimate is an expected-spike-count-per-timebin; to get
-    firing rate in Hz, divide by dt.
+    Circular KDE for angular data. Estimates expected spike count per timebin
+    at each angular bin (divide by dt for Hz). See `kde()` for the linear
+    equivalent.
 
-    Kernel Density Estimation goes as follows (the denominator corrects for
-    non-uniform position density):
+              # spikes observed at θ     Ks
+      mu(θ) = ---------------------- :=  --
+                  # visits to θ           Kx
 
-              # spikes observed at θ     sum_{spike_times} K(θ, θ(ts))     Ks
-      mu(θ) = ---------------------- ==> ----------------------------- :=  --
-                  # visits to θ            sum_{all_times} K(θ, θ(t))      Kx
-              = exp[log(Ks) - log(Kx)]
+    Unlike `kde()`, which evaluates all pairwise kernel values, this function
+    first histograms the data then smooths via FFT-based circular convolution
+    with a von Mises kernel:
 
-    Unlike the standard `kde()` function which evaluates all pairwise
-    kernel values between bins and trajectory positions, this circular variant
-    first histograms the data into angular bins and then smooths via circular
-    convolution with a von Mises kernel. The convolution is computed
-    efficiently using FFT:
+        smooth(x) = IFFT(FFT(histogram) * FFT(von_Mises_kernel))
 
-        spike_smooth = IFFT(FFT(spike_histogram) * FFT(von_Mises_kernel))
-        position_smooth = IFFT(FFT(position_histogram) * FFT(von_Mises_kernel))
+    This is O(N_bins * log(N_bins)) rather than O(N_bins * T).
 
-    This FFT approach replaces the O(N_bins * T) pairwise kernel evaluations
-    with O(N_bins * log(N_bins)) operations, and is exact for uniformly spaced
-    bins on the circle.
-
-    The von Mises kernel is the circular analogue of the Gaussian, with
-    concentration parameter kappa. Internally, `kernel_bandwidth` (the
-    standard deviation of the smoothing kernel in radians) is converted to
-    kappa via the approximation kappa ≈ 1 / sigma^2, which is accurate when
-    kappa > 2 (i.e. bandwidth < ~0.7 rad). Since typical bandwidths are small
-    relative to the full circle, this holds in almost all practical cases.
-    Larger `kernel_bandwidth` means smoother/wider smoothing, matching the
-    standard KDE convention.
-
-    Optionally, a boolean mask same shape as spikes can be passed to ignore
-    certain spikes. This restricts the KDE calculation to only the spikes
-    where mask is True.
-
-    IMPORTANT: bins must be uniformly spaced in [-pi, pi).
+    Both `bins` and `trajectory` must be in radians in [-pi, pi). Bins must
+    be uniformly spaced. `kernel_bandwidth` is in radians and is converted
+    internally to von Mises concentration: kappa = 1 / kernel_bandwidth^2
+    (accurate for kappa > 2, i.e. small bandwidth < ~0.7 rad).
 
     Parameters
     ----------
     bins : jnp.ndarray, shape (N_bins,) or (N_bins, 1)
-        The angle bin centres at which to estimate the firing rate. Must be
-        uniformly spaced in [-pi, pi).
+        Angle bin centres in radians, uniformly spaced in [-pi, pi).
     trajectory : jnp.ndarray, shape (T,) or (T, 1)
-        The angular position of the agent at each time step, in radians.
+        Angular position of the agent at each time step, in radians in [-pi, pi).
     spikes : jnp.ndarray, shape (T, N_neurons)
-        The spike counts of each neuron at each time step (integer array,
-        can be > 1).
+        Spike counts at each time step (integer array, can be > 1).
     kernel : None
-        Unused placeholder, kept for API consistency with `kde()`.
+        Unused, kept for API consistency with `kde()`.
     kernel_bandwidth : float
-        The bandwidth (standard deviation) of the smoothing kernel in radians.
-        Larger values produce smoother estimates. Internally converted to von
-        Mises concentration via kappa = 1 / kernel_bandwidth^2. Default is
-        0.3 rad (~17 degrees).
+        Std dev of smoothing kernel in radians. Larger = smoother.
+        Converted to von Mises kappa = 1 / kernel_bandwidth^2.
     mask : jnp.ndarray, shape (T, N_neurons), optional
-        A boolean mask to apply to the spikes. If None, no mask is applied.
-        Default is None.
+        Boolean mask for spikes. Default is None (no masking).
     return_position_density : bool
-        If True, this function also returns the position density (the
-        denominator of the KDE) at each bin. Default is False.
+        If True, also returns normalised position density. Default is False.
     eps : float
-        Small constant added to the denominator to avoid division by zero.
-        Default is 1e-6.
+        Small constant to avoid division by zero. Default is 1e-6.
 
     Returns
     -------
     kernel_density_estimate : jnp.ndarray, shape (N_neurons, N_bins)
-        Expected spike count per time-bin at each angular bin.
     position_density : jnp.ndarray, shape (N_bins,) (optional)
-        Normalised position density (sums to 1 over bins), independent of
-        neuron masks. Only returned if return_position_density=True.
+        Normalised position density (sums to 1), independent of neuron masks.
     """
     assert bins.ndim == 1 or (bins.ndim == 2 and bins.shape[1] == 1), "bins should be shape (N_bins,) or (N_bins, 1)."
-    assert trajectory.ndim == 1 or (trajectory.ndim == 2 and trajectory.shape[1] == 1), "trajectory should be shape (T,) or (T, 1). kde_circular1d only supports 1D circular data."
+    assert trajectory.ndim == 1 or (trajectory.ndim == 2 and trajectory.shape[1] == 1), "trajectory should be shape (T,) or (T, 1). kde_angular only supports 1D circular data."
 
     bins = jnp.asarray(bins).flatten()
     trajectory = jnp.asarray(trajectory).flatten()
