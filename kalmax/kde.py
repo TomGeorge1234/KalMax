@@ -194,58 +194,87 @@ def kde_circular1d(
     trajectory: jnp.ndarray,                 # (T,) angles in radians
     spikes: jnp.ndarray,                     # (T, N_neurons) spike counts
     kernel=None,                             # unused placeholder
-    kernel_bandwidth: float = 10.0,          # von Mises kappa
+    kernel_bandwidth: float = 0.3,           # std dev of smoothing kernel in radians
     mask: jnp.ndarray = None,                # (T, N_neurons) boolean
     return_position_density: bool = False,
     eps: float = 1e-6,
 ) -> Union[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """
-    Circular KDE on [-pi, pi) with FFT circular convolution and von Mises kernel.
+    Performs circular KDE to estimate the expected number of spikes each neuron
+    will fire at each angular position in `bins` given past `trajectory` and
+    `spikes` data. This estimate is an expected-spike-count-per-timebin; to get
+    firing rate in Hz, divide by dt.
 
-    Computes the kernel density estimate as:
-    
-        KDE(θ) = spike_smooth(θ) / position_smooth(θ)
-    
-    where spike_smooth and position_smooth are obtained by circular convolution:
-    
-        spike_smooth = IFFT(FFT(spike_histogram) ⊙ FFT(von_Mises_kernel))
-        position_smooth = IFFT(FFT(position_histogram) ⊙ FFT(von_Mises_kernel))
-    
-    The ⊙ operator denotes element-wise multiplication. FFT-based circular convolution
-    allows efficient smoothing of histograms by the von Mises kernel without explicitly
-    computing all pairwise kernel evaluations.
+    Kernel Density Estimation goes as follows (the denominator corrects for
+    non-uniform position density):
 
-    Output is expected spikes per time-bin per angle-bin (divide by dt for Hz),
-    shape (N_neurons, N_bins). If return_position_density=True, also returns
-    the smoothed occupancy, shape (N_bins,), normalised to sum to 1.
+              # spikes observed at θ     sum_{spike_times} K(θ, θ(ts))     Ks
+      mu(θ) = ---------------------- ==> ----------------------------- :=  --
+                  # visits to θ            sum_{all_times} K(θ, θ(t))      Kx
+              = exp[log(Ks) - log(Kx)]
 
-    IMPORTANT: bins are assumed to be uniformly spaced in [-pi, pi).
+    Unlike the standard `kde()` function which evaluates all pairwise
+    kernel values between bins and trajectory positions, this circular variant
+    first histograms the data into angular bins and then smooths via circular
+    convolution with a von Mises kernel. The convolution is computed
+    efficiently using FFT:
+
+        spike_smooth = IFFT(FFT(spike_histogram) * FFT(von_Mises_kernel))
+        position_smooth = IFFT(FFT(position_histogram) * FFT(von_Mises_kernel))
+
+    This FFT approach replaces the O(N_bins * T) pairwise kernel evaluations
+    with O(N_bins * log(N_bins)) operations, and is exact for uniformly spaced
+    bins on the circle.
+
+    The von Mises kernel is the circular analogue of the Gaussian, with
+    concentration parameter kappa. Internally, `kernel_bandwidth` (the
+    standard deviation of the smoothing kernel in radians) is converted to
+    kappa via the approximation kappa ≈ 1 / sigma^2, which is accurate when
+    kappa > 2 (i.e. bandwidth < ~0.7 rad). Since typical bandwidths are small
+    relative to the full circle, this holds in almost all practical cases.
+    Larger `kernel_bandwidth` means smoother/wider smoothing, matching the
+    standard KDE convention.
+
+    Optionally, a boolean mask same shape as spikes can be passed to ignore
+    certain spikes. This restricts the KDE calculation to only the spikes
+    where mask is True.
+
+    IMPORTANT: bins must be uniformly spaced in [-pi, pi).
 
     Parameters
     ----------
-    bins : jnp.ndarray, shape (N_bins, ) or (N_bins, 1,)
-        The angle bins at which to estimate the firing rate. Should be uniformly spaced in [-pi, pi).
-    trajectory : jnp.ndarray, shape (T, D)
-        The position of the agent at each time step
+    bins : jnp.ndarray, shape (N_bins,) or (N_bins, 1)
+        The angle bin centres at which to estimate the firing rate. Must be
+        uniformly spaced in [-pi, pi).
+    trajectory : jnp.ndarray, shape (T,) or (T, 1)
+        The angular position of the agent at each time step, in radians.
     spikes : jnp.ndarray, shape (T, N_neurons)
-        The spike counts of the neuron at each time step (integer array, can be > 1)
-    kernel : function
-        The kernel function to use for density estimation. See `kernels.py` for signature and examples.
+        The spike counts of each neuron at each time step (integer array,
+        can be > 1).
+    kernel : None
+        Unused placeholder, kept for API consistency with `kde()`.
     kernel_bandwidth : float
-        The bandwidth of the kernel
+        The bandwidth (standard deviation) of the smoothing kernel in radians.
+        Larger values produce smoother estimates. Internally converted to von
+        Mises concentration via kappa = 1 / kernel_bandwidth^2. Default is
+        0.3 rad (~17 degrees).
     mask : jnp.ndarray, shape (T, N_neurons), optional
-        A boolean mask to apply to the spikes. If None, no mask is applied. Default is None.
-    batch_size : int
-        The time axis is split into batches of this size to avoid memory errors, each batch is then processed in series. Default is 36000 (chosen to be 1 hr at 10 and an amount which doesn't crash CPU)
+        A boolean mask to apply to the spikes. If None, no mask is applied.
+        Default is None.
     return_position_density : bool
-        If True, this function also returns the position density (the denominator of the KDE) at each bin.
+        If True, this function also returns the position density (the
+        denominator of the KDE) at each bin. Default is False.
+    eps : float
+        Small constant added to the denominator to avoid division by zero.
+        Default is 1e-6.
 
-    
     Returns
     -------
     kernel_density_estimate : jnp.ndarray, shape (N_neurons, N_bins)
+        Expected spike count per time-bin at each angular bin.
     position_density : jnp.ndarray, shape (N_bins,) (optional)
-        Normalised position density (sums to 1 over bins), independent of neuron masks.
+        Normalised position density (sums to 1 over bins), independent of
+        neuron masks. Only returned if return_position_density=True.
     """
     assert bins.ndim == 1 or (bins.ndim == 2 and bins.shape[1] == 1), "bins should be shape (N_bins,) or (N_bins, 1)."
     assert trajectory.ndim == 1 or (trajectory.ndim == 2 and trajectory.shape[1] == 1), "trajectory should be shape (T,) or (T, 1). kde_circular1d only supports 1D circular data."
@@ -269,7 +298,9 @@ def kde_circular1d(
     # 2) von Mises kernel over offsets Δθ in [-pi, pi)
     # Build on symmetric grid => Δθ=0 sits at index n_bins//2
     dtheta = jnp.linspace(-jnp.pi, jnp.pi, n_bins, endpoint=False)
-    kappa = kernel_bandwidth
+    # Convert bandwidth (std in radians) to von Mises concentration.
+    # kappa ≈ 1/σ² is a good approximation for kappa > 2 (σ < ~0.7 rad).
+    kappa = 1.0 / (kernel_bandwidth ** 2)
     vm = jnp.exp(kappa * jnp.cos(dtheta))
     vm = vm / jnp.sum(vm)
 
