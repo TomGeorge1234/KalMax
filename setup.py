@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="kalmax",  
-    version="0.1.0", 
+    version="0.2.0", 
     author="Tom George",
     author_email="tomgeorge1@btinternet.com",
     description="Kalman based neural decoding in Jax",
