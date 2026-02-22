@@ -2,6 +2,63 @@ import jax
 import jax.numpy as jnp
 import tqdm as tqdm
 
+_TAU = 2 * jnp.pi
+
+def _wrap_minuspi_pi(theta: jnp.ndarray) -> jnp.ndarray:
+    """Wrap angles to [-pi, pi).
+    
+    Parameters
+    ----------
+    theta : jnp.ndarray
+        Angles in radians (any range)
+    
+    Returns
+    -------
+    jnp.ndarray
+        Angles wrapped to [-pi, pi)
+    """
+    return jnp.mod(theta + jnp.pi, _TAU) - jnp.pi
+
+def _bin_indices_minuspi_pi(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
+    """Map theta in radians to integer bin indices [0, n_bins).
+    
+    Maps angles to bin indices where bin 0 corresponds to [-pi, -pi + Δ).
+    
+    Parameters
+    ----------
+    theta : jnp.ndarray
+        Angles in radians (any range)
+    n_bins : int
+        Number of bins
+    
+    Returns
+    -------
+    jnp.ndarray
+        Integer bin indices in [0, n_bins)
+    """
+    theta = _wrap_minuspi_pi(theta)
+    u = (theta + jnp.pi) * (n_bins / _TAU)           # in [0, n_bins)
+    idx = jnp.floor(u).astype(jnp.int32)
+    # guard against theta == pi mapping to n_bins (shouldn't happen for [-pi,pi) but safe)
+    return jnp.clip(idx, 0, n_bins - 1)
+
+def _circular_conv_fft_1d(x: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
+    """Circular convolution via FFT for 1D arrays.
+    
+    Parameters
+    ----------
+    x : jnp.ndarray
+        Input array of length N
+    k : jnp.ndarray
+        Kernel array of length N
+    
+    Returns
+    -------
+    jnp.ndarray
+        Circular convolution of x and k, same length as input
+    """
+    return jnp.fft.ifft(jnp.fft.fft(x) * jnp.fft.fft(k)).real
+
 def gaussian_pdf(x : jnp.ndarray,
                  mu : jnp.ndarray, 
                  sigma : jnp.ndarray,) -> jnp.ndarray:
