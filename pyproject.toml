@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kalmax"
+dynamic = ["version"]
+description = "Kalman based neural decoding in JAX"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Tom George", email = "tomgeorge1@btinternet.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = ["jax"]
+
+[project.optional-dependencies]
+demo = ["matplotlib", "tqdm", "ratinabox", "pykalman", "ipykernel"]
+dev = ["pytest>=7.0", "pytest-cov", "build", "twine", "ruff"]
+
+[project.urls]
+Homepage = "https://github.com/TomGeorge1234/KalMax"
+
+[tool.setuptools.dynamic]
+version = { attr = "kalmax.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
