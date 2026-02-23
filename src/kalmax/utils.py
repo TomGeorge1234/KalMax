@@ -1,17 +1,28 @@
-import jax 
+"""Utility functions: Gaussian PDF helpers, Gaussian fitting, circular/angular helpers, and simulated data generation."""
+
+import jax
 import jax.numpy as jnp
-import tqdm as tqdm
 
 _TAU = 2 * jnp.pi
 
+__all__ = [
+    "gaussian_pdf",
+    "log_gaussian_pdf",
+    "gaussian_norm_const",
+    "fit_gaussian",
+    "fit_gaussian_vmap",
+    "make_simulated_dataset",
+]
+
+
 def _wrap_minuspi_pi(theta: jnp.ndarray) -> jnp.ndarray:
     """Wrap angles to [-pi, pi).
-    
+
     Parameters
     ----------
     theta : jnp.ndarray
         Angles in radians (any range)
-    
+
     Returns
     -------
     jnp.ndarray
@@ -19,39 +30,41 @@ def _wrap_minuspi_pi(theta: jnp.ndarray) -> jnp.ndarray:
     """
     return jnp.mod(theta + jnp.pi, _TAU) - jnp.pi
 
+
 def _bin_indices_minuspi_pi(theta: jnp.ndarray, n_bins: int) -> jnp.ndarray:
     """Map theta in radians to integer bin indices [0, n_bins).
-    
-    Maps angles to bin indices where bin 0 corresponds to [-pi, -pi + Δ).
-    
+
+    Maps angles to bin indices where bin 0 corresponds to [-pi, -pi + delta).
+
     Parameters
     ----------
     theta : jnp.ndarray
         Angles in radians (any range)
     n_bins : int
         Number of bins
-    
+
     Returns
     -------
     jnp.ndarray
         Integer bin indices in [0, n_bins)
     """
     theta = _wrap_minuspi_pi(theta)
-    u = (theta + jnp.pi) * (n_bins / _TAU)           # in [0, n_bins)
+    u = (theta + jnp.pi) * (n_bins / _TAU)  # in [0, n_bins)
     idx = jnp.floor(u).astype(jnp.int32)
     # guard against theta == pi mapping to n_bins (shouldn't happen for [-pi,pi) but safe)
     return jnp.clip(idx, 0, n_bins - 1)
 
+
 def _circular_conv_fft_1d(x: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
     """Circular convolution via FFT for 1D arrays.
-    
+
     Parameters
     ----------
     x : jnp.ndarray
         Input array of length N
     k : jnp.ndarray
         Kernel array of length N
-    
+
     Returns
     -------
     jnp.ndarray
@@ -59,21 +72,23 @@ def _circular_conv_fft_1d(x: jnp.ndarray, k: jnp.ndarray) -> jnp.ndarray:
     """
     return jnp.fft.ifft(jnp.fft.fft(x) * jnp.fft.fft(k)).real
 
-def gaussian_pdf(x : jnp.ndarray,
-                 mu : jnp.ndarray, 
-                 sigma : jnp.ndarray,) -> jnp.ndarray:
-    """ Calculates the gaussian pdf of a multivariate normal distribution of mean mu and covariance sigma at x
+
+def gaussian_pdf(
+    x: jnp.ndarray,
+    mu: jnp.ndarray,
+    sigma: jnp.ndarray,
+) -> jnp.ndarray:
+    """Calculates the gaussian pdf of a multivariate normal distribution of mean mu and covariance sigma at x
 
     Parameters
     ----------
-
     x: (D,) array
         The position at which to evaluate the pdf
     mu: (D,) array
         The mean of the distribution
     sigma: (D, D) array
         The covariance of the distribution
-    
+
     Returns
     -------
     pdf: float
@@ -90,10 +105,13 @@ def gaussian_pdf(x : jnp.ndarray,
     norm_const = gaussian_norm_const(sigma)
     return norm_const * jnp.exp(-0.5 * jnp.sum(x @ jnp.linalg.inv(sigma) * x, axis=-1))
 
-def log_gaussian_pdf(x : jnp.ndarray,
-                     mu : jnp.ndarray,
-                     sigma : jnp.ndarray,) -> jnp.ndarray:
-    """ Calculates the log of the gaussian pdf of a multivariate normal distribution of mean mu and covariance sigma at x
+
+def log_gaussian_pdf(
+    x: jnp.ndarray,
+    mu: jnp.ndarray,
+    sigma: jnp.ndarray,
+) -> jnp.ndarray:
+    """Calculates the log of the gaussian pdf of a multivariate normal distribution of mean mu and covariance sigma at x
 
     Parameters
     ----------
@@ -104,7 +122,7 @@ def log_gaussian_pdf(x : jnp.ndarray,
     sigma: (D, D) array
         The covariance of the distribution
 
-    Returns 
+    Returns
     -------
     log_pdf: float
         The log probability density at x
@@ -121,8 +139,7 @@ def log_gaussian_pdf(x : jnp.ndarray,
     return jnp.log(norm_const) - 0.5 * jnp.sum(x @ jnp.linalg.inv(sigma) * x)
 
 
-
-def gaussian_norm_const(sigma : jnp.ndarray) -> jnp.ndarray:
+def gaussian_norm_const(sigma: jnp.ndarray) -> jnp.ndarray:
     """Calculates the normalizing constant of a multivariate normal distribution with covariance sigma
 
     Parameters
@@ -139,16 +156,17 @@ def gaussian_norm_const(sigma : jnp.ndarray) -> jnp.ndarray:
     D = sigma.shape[0]
     return 1 / jnp.sqrt((2 * jnp.pi) ** D * jnp.linalg.det(sigma))
 
+
 def fit_gaussian(x, likelihood):
     """Fits a multivariate-Gaussian to the likelihood function P(spikes | x) in x-space.
-    
+
     Parameters
     ----------
     x : jnp.ndarray, shape (N_bins,D)
         The position bins in which the likelihood is calculated
     likelihood : jnp.ndarray, shape (N_bins,)
         The combined likelihood (not log-likelihood) of the neurons firing at each position bin
-        
+
     Returns
     -------
     mu : jnp.ndarray, shape (D,)
@@ -156,34 +174,59 @@ def fit_gaussian(x, likelihood):
     mode : jnp.ndarray, shape (D,)
         The mode of the Gaussian
     covariance : jnp.ndarray, shape (D, D)
-        The covariance of the Gaussian    
+        The covariance of the Gaussian
     """
     assert x.ndim == 2
     assert likelihood.ndim == 1
     assert x.shape[0] == likelihood.shape[0]
-    
+
     mu = (x.T @ likelihood) / likelihood.sum()
     mode = x[jnp.argmax(likelihood)]
     covariance = ((x - mu) * likelihood[:, None]).T @ (x - mu) / likelihood.sum()
     return mu, mode, covariance
 
 
-# Like fit_gaussian, but accepts likelihoods of shape (T, N_bins)
-# returns means, modes and covariances of shape (T, D), (T, D), (T, D, D)
-fit_gaussian_vmap = jax.vmap(fit_gaussian, in_axes=(None, 0)) 
+def fit_gaussian_vmap(x, likelihoods):
+    """Fits a multivariate-Gaussian to each row of a batch of likelihood arrays.
+
+    This is the vmapped version of ``fit_gaussian``: it accepts likelihoods of
+    shape ``(T, N_bins)`` and returns batched means, modes, and covariances.
+
+    Parameters
+    ----------
+    x : jnp.ndarray, shape (N_bins, D)
+        The position bins (shared across all time steps).
+    likelihoods : jnp.ndarray, shape (T, N_bins)
+        Likelihood values at each bin for each time step.
+
+    Returns
+    -------
+    means : jnp.ndarray, shape (T, D)
+        The mean of each fitted Gaussian.
+    modes : jnp.ndarray, shape (T, D)
+        The mode of each fitted Gaussian.
+    covariances : jnp.ndarray, shape (T, D, D)
+        The covariance of each fitted Gaussian.
+    """
+    return jax.vmap(fit_gaussian, in_axes=(None, 0))(x, likelihoods)
 
 
+def make_simulated_dataset(time_mins=60, n_cells=100, firing_rate=10, random_seed=None, **kwargs):
+    """Makes a simulated dataset for an agent randomly foraging a 1 m square box. Data generated with the RatInABox package and defaults to place cells. Returns the data as jax arrays.
 
-def make_simulated_dataset(time_mins = 60, n_cells = 100, firing_rate = 10, random_seed=None, **kwargs):
-    """Makes a simulated dataset for an agent randomly foraging a 1 m square box. Data generated with the RatInABox package and defaults ot 50 place cells. Returns the data as jax arrays.
-    
     Parameters
     ----------
     time_mins: int
         The number of minutes to simulate the agent for
+    n_cells : int
+        The number of place cells to simulate. Default is 100.
+    firing_rate : float
+        The maximum firing rate of each place cell in Hz. Default is 10.
+    random_seed : int, optional
+        If provided, sets the numpy random seed for reproducibility.
     kwargs: dict
         Additional arguments to pass to the RatInABox simulation
-    
+
     Returns
     -------
     time: jnp.ndarray, shape (N,)
@@ -191,33 +234,33 @@ def make_simulated_dataset(time_mins = 60, n_cells = 100, firing_rate = 10, rand
     position: jnp.ndarray, shape (N, dims)
         The position of the agent at each time point
     spikes: jnp.ndarray, shape (N, N_cells)
-        The spikes of the 50 place cells at each time point
+        The spikes of the place cells at each time point
     """
+    import tqdm as tqdm
 
-    from ratinabox.Environment import Environment 
-    from ratinabox.Agent import Agent 
+    from ratinabox.Environment import Environment
+    from ratinabox.Agent import Agent
     from ratinabox.Neurons import PlaceCells
 
     if random_seed is not None:
         import numpy as np
+
         np.random.seed(random_seed)
-    
-    env_params = kwargs.get('env_params', {})
-    agent_params = kwargs.get('agent_params', {'dt':0.1})
-    place_cell_params = kwargs.get('place_cell_params', {'n':n_cells, 'max_fr':firing_rate,'widths':0.1})
+
+    env_params = kwargs.get("env_params", {})
+    agent_params = kwargs.get("agent_params", {"dt": 0.1})
+    place_cell_params = kwargs.get("place_cell_params", {"n": n_cells, "max_fr": firing_rate, "widths": 0.1})
 
     env = Environment(params=env_params)
     agent = Agent(env, params=agent_params)
     place_cells = PlaceCells(agent, params=place_cell_params)
-    
 
     for i in tqdm.tqdm(range(int(60 * time_mins / agent.dt))):
         agent.update()
         place_cells.update()
 
-    time  = jnp.array(agent.history['t'])
-    position = jnp.array(agent.history['pos'])
-    spikes = jnp.array(place_cells.history['spikes'])
+    time = jnp.array(agent.history["t"])
+    position = jnp.array(agent.history["pos"])
+    spikes = jnp.array(place_cells.history["spikes"])
 
     return time, position, spikes
-

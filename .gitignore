@@ -1,9 +1,11 @@
-__pycache__
-figures/*
-!figures/display_figures
-.DS_Store
-KalMax.egg-info
-data/
+__pycache__/
+*.pyc
+*.egg-info/
 build/
 dist/
+.venv/
+.DS_Store
+figures/*
+!figures/display_figures
+data/
 publishing_instructions.md
