@@ -18,7 +18,7 @@ Because Likelihood Estimation + Kalman filtering = Powerful neural decoding. By 
 <img src="figures/display_figures/filter_comparisons.gif" width=850>
 
 
-Core `KalMax` functions are optimised and jit-compiled in jax making them **very fast**. For example `KalMax` kalman filtering is >13 times faster than an equivalent numpy implementation by the popular [`pykalman`](https://github.com/pykalman/pykalman/tree/master) library (see [demo](./kalmax_demo.ipynb)).
+Core `KalMax` functions are optimised and jit-compiled in jax making them **very fast**. For example `KalMax` kalman filtering is >13 times faster than an equivalent numpy implementation by the popular [`pykalman`](https://github.com/pykalman/pykalman/tree/master) library (see [demo](./examples/kalmax_demo.ipynb)).
 
 <img src="figures/display_figures/kalman_speed_comparison.png" width=150>
 
@@ -28,9 +28,23 @@ Core `KalMax` functions are optimised and jit-compiled in jax making them **very
 pip install kalmax
 ```
 
-# Usage  
+### Development install
+```bash
+git clone https://github.com/TomGeorge1234/KalMax.git
+cd KalMax
+pip install -e ".[dev]"   # installs with test/lint dependencies
+```
 
-A full demo [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/TomGeorge1234/KalMax/blob/main/kalmax_demo.ipynb) is provided in the [`kalmax_demo.ipynb`](./kalmax_demo.ipynb). Sudo-code is provided below. 
+To run tests and linting:
+```bash
+pytest                     # run test suite
+ruff check src/            # lint
+ruff format --check src/   # check formatting
+```
+
+# Usage
+
+A full demo [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/TomGeorge1234/KalMax/blob/main/examples/kalmax_demo.ipynb) is provided in [`examples/kalmax_demo.ipynb`](./examples/kalmax_demo.ipynb). Pseudo-code is provided below.
 
 ```python
 import kalmax 
@@ -53,7 +67,7 @@ firing_rate = kalmax.kde.kde(
     trajectory = Z_train,
     spikes = S_train,
     kernel = kalmax.kernels.gaussian_kernel,
-    kernel_kwargs = {'covariance':0.01**2*np.eye(DIMS)}, # kernel bandwidth
+    kernel_bandwidth = 0.01,
     ) # --> (N_CELLS, N_BINS)
 ```
 <img src="figures/display_figures/receptive_fields.png" width=850>
@@ -64,7 +78,7 @@ firing_rate = kalmax.kde.kde(
 log_likelihoods = kalmax.kde.poisson_log_likelihood(
     spikes = S_test,                       
     mean_rate = firing_rate,
-    ) # --> (T_TEST, N_CELLS)
+    ) # --> (T_TEST, N_BINS)
 
 # 2.2 FIT GAUSSIAN TO LIKELIHOODS using kalmax.utils.fit_gaussian
 MLE_means, MLE_modes, MLE_covs = kalmax.utils.fit_gaussian_vmap(
@@ -75,10 +89,10 @@ MLE_means, MLE_modes, MLE_covs = kalmax.utils.fit_gaussian_vmap(
 <img src="figures/display_figures/likelihood_maps_fitted.png" width=850>
 
 ```python
-# 3. KALMAN FILTER / SMOOTH using kalmax.KalmanFilter.KalmanFilter
-kalman_filter = kalmax.kalman.KalmanFilter(
-    dim_Z = DIMS, 
-    dim_Y = N_CELLS,
+# 3. KALMAN FILTER / SMOOTH using kalmax.KalmanFilter
+kalman_filter = kalmax.KalmanFilter(
+    dim_Z = DIMS,
+    dim_Y = DIMS,
     # SEE DEMO FOR HOW TO FIT/SET THESE
     F=F, # state transition matrix
     Q=Q, # state noise covariance
